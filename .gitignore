@@ -1,0 +1,8 @@
+data/server.log
+data/sessions/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Personal Claude Code overrides — not shared.
+.claude/settings.local.json

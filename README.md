@@ -1,0 +1,198 @@
+# qwen-delegate-mcp
+
+Cut Claude Code costs by delegating mechanical work to a local Qwen model.
+Claude plans and reviews; Qwen does the grunt work (bulk renames, docstrings,
+boilerplate, test scaffolding) locally, for free.
+
+Every `qwen_send` runs on your machine at **zero API cost**. Claude still bills
+for its own turns, but it only sees Qwen's final reply rather than the whole
+iteration transcript, so its context stays small and its turns stay short. The
+savings are biggest on work that iterates: refactors, docstring passes, test
+scaffolding.
+
+Sessions are stateful: Qwen keeps context across calls within a session, so
+delegating feels like handing off to a coworker rather than querying a stateless
+oracle.
+
+## Architecture
+
+```
+   ┌─────────────────────┐
+   │     Claude Code     │  plans the work, reviews every reply
+   └──────────┬──────────┘
+              │
+              │  MCP over HTTP, localhost:11435
+              │  qwen_start_session / qwen_send / qwen_end_session ...
+              ▼
+   ┌─────────────────────────────┐  write   ┌──────────────────────────┐
+   │     qwen-delegate-mcp       │─────────►│  data/sessions/<id>.json │
+   │                             │          │                          │
+   │  owns session state in RAM  │◄─────────│  one file per session,   │
+   │  one message list per id    │   load   │  reloaded on restart     │
+   └──────────┬──────────────────┘          └──────────────────────────┘
+              │
+              │  HTTP, localhost:11434
+              │  POST /api/chat, full history replayed each turn
+              ▼
+   ┌─────────────────────────────┐
+   │           Ollama            │
+   │  ┌───────────────────────┐  │
+   │  │    Qwen3.6-35B-A3B    │  │  35B params total, 3B active (MoE)
+   │  │  resident in RAM via  │  │  stays loaded between calls, so only
+   │  │     keep_alive=30m    │  │  the first call pays load time
+   │  └───────────────────────┘  │
+   └─────────────────────────────┘
+```
+
+**Claude Code** sees five tools and calls them like it would `Read` or `Bash`.
+
+**The MCP server** owns session state. Each session is a message list keyed by a
+short `session_id`. Every `qwen_send` replays the full history to Ollama so Qwen
+has full context, while Claude's own context stays small: it only ever sees the
+latest reply, never the accumulated transcript. That gap is where the savings
+come from.
+
+**Ollama** hosts the model and keeps it resident, so repeated turns within a
+session are fast.
+
+It runs as an HTTP daemon rather than stdio because session state lives in
+memory and there must be exactly one copy. Under stdio, every Claude Code
+instance spawns its own server, so `qwen_list_sessions` could not find a session
+you opened in another project. `MCP_TRANSPORT=stdio` is fine for a single
+client, and the tests use it.
+
+## Setup
+
+Prerequisites: macOS, Homebrew, Claude Code, `uv` (`brew install uv`).
+
+**1. Install.**
+
+```bash
+git clone <this-repo> qwen-delegate-mcp
+cd qwen-delegate-mcp
+./install.sh          # idempotent, safe to re-run
+```
+
+This installs Ollama, pulls `qwen3.6:35b-a3b` (~24 GB, one time), loads a
+LaunchAgent on port 11435, and registers the server with `claude mcp add`.
+Verify with `claude mcp get qwen-delegate`, which should report
+`Status: ✔ Connected`.
+
+**2. Update your CLAUDE.md. This is required.** Installing the server is not
+enough. Without guidance Claude will not reliably use these tools, and a bare
+*"delegate to Qwen"* can send it looking for a nonexistent `qwen` CLI. Copy the
+block from [`CLAUDE.md`](./CLAUDE.md) into `~/.claude/CLAUDE.md` for every
+project, or into a single project's own `CLAUDE.md`.
+
+**3. Restart Claude Code.** Already-open sessions will not see the tools until
+they restart. In a new session, `/mcp` should list `qwen-delegate` with five
+tools.
+
+## Use
+
+1. Ask for mechanical work as you normally would. With CLAUDE.md in place,
+   Claude delegates on its own. To force it, be explicit:
+   > *"Open a qwen session for this refactor and use the same one across all
+   > files. Verify each file after Qwen edits it."*
+2. Claude opens one session, iterates with Qwen, reviews the output, and closes
+   the session when the task is done.
+3. Check in anytime. `/mcp` lists the tools, and asking Claude to run
+   `qwen_list_sessions` shows what is still open.
+
+## When to delegate
+
+Notes from real use. We keep updating this as we learn.
+
+**Choose by verification cost, not task size.** If checking Qwen's output costs
+about what writing it yourself would, delegating adds work instead of saving it.
+Delegation optimizes the abundant resource (typing code) and taxes the scarce
+one (verifying it).
+
+**What pays:** many near-identical mechanical units with a cheap verifier
+already in place. One good brief, N outputs, `npm test` as the oracle. Bulk
+docstrings, renames across 40 files, format conversions, test scaffolding from a
+fixed template, first drafts.
+
+**What does not:** anything whose failure mode is silent. A textbook-looking
+formula that passes toy unit tests and is quietly wrong on real data is exactly
+what a cheap model writes and a cheap verifier green-lights. Also skip anything
+needing images (this path is text only), anything where writing the brief costs
+more than writing the code, and anything needing codebase context you would have
+to paste in wholesale.
+
+**In practice**
+
+- Read `qwen_get_history` before `qwen_end_session`. Closing deletes the
+  transcript, and that transcript is your only evidence of whether delegation
+  worked.
+- Qwen can crash mid-task. Anything routed through it should be resumable.
+- If a subagent drives Qwen, that hop only pays when Qwen's output is bulky
+  enough to be worth keeping out of the orchestrator's context. For a 20-line
+  fix the round trip is pure overhead.
+- Delegation is not a goal in itself. Plenty of sessions contain almost no bulk
+  code-writing, and forcing the rule there makes the work worse, not cheaper.
+
+## Tools
+
+| tool | purpose |
+|---|---|
+| `qwen_start_session(topic, system_prompt, model)` | Open a stateful chat; returns `session_id`. |
+| `qwen_send(session_id, message)` | Send a turn. Full history is replayed to Ollama. |
+| `qwen_get_history(session_id, tail=0)` | Read the transcript; `tail=N` for the last N. |
+| `qwen_list_sessions()` | List active sessions. |
+| `qwen_end_session(session_id)` | Close and delete state. Idempotent. |
+
+One session per coherent task; reuse the `session_id` across follow-ups.
+
+## Configuration
+
+Set in the LaunchAgent plist or your shell.
+
+| var | default | purpose |
+|---|---|---|
+| `OLLAMA_HOST` | `http://localhost:11434` | Where Ollama listens. |
+| `QWEN_MODEL` | `qwen3.6:35b-a3b` | Default model tag. |
+| `QWEN_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded. |
+| `QWEN_TIMEOUT` | `600` | HTTP timeout per `/api/chat` call, seconds. |
+| `QWEN_DATA_DIR` | `<repo>/data/sessions` | Where session JSON lives. |
+| `MCP_HOST` / `MCP_PORT` | `127.0.0.1` / `11435` | MCP server bind address. |
+| `MCP_TRANSPORT` | `streamable-http` | `stdio` for local testing. |
+
+## Troubleshooting
+
+**Claude looks for a `qwen` CLI.** You skipped the CLAUDE.md step, or Claude
+Code was already running at install. Update it and restart.
+
+**`✘ Failed to connect`.** Something else holds the port. Check with
+`lsof -iTCP:11435 -sTCP:LISTEN`, then change `MCP_PORT` in the plist, reload it,
+and re-register:
+
+```bash
+claude mcp remove qwen-delegate --scope user
+claude mcp add --transport http --scope user qwen-delegate http://localhost:<port>/mcp
+```
+
+**`qwen_send` returns an HTTP error.** Ollama is down or the model is not
+pulled. Check `curl localhost:11434/api/version` and `ollama list`.
+
+**First call is slow (30-60 s).** Ollama is loading 24 GB into memory. Later
+calls are warm; raise `QWEN_KEEP_ALIVE` to extend that.
+
+**Session runs out of context.** Qwen3.6 has 262K native. End the session, or
+have Qwen summarize and seed the next session's `system_prompt` with it.
+
+**Want a clean slate.** `rm data/sessions/*.json` while the server is idle.
+
+Logs are at `data/server.log`. LaunchAgent control: `launchctl list | grep qwen`,
+`launchctl unload|load ~/Library/LaunchAgents/local.qwen-delegate-mcp.plist`.
+
+## Uninstall
+
+```bash
+launchctl unload ~/Library/LaunchAgents/local.qwen-delegate-mcp.plist
+rm ~/Library/LaunchAgents/local.qwen-delegate-mcp.plist
+claude mcp remove qwen-delegate --scope user
+# Then remove the guidance block from your CLAUDE.md (manual).
+
+brew uninstall ollama && rm -rf ~/.ollama   # optional: nuke Ollama and the model
+```

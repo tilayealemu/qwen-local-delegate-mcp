@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  protocol:
+    name: protocol test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Spawns src/server.py over stdio, initializes, lists tools, and calls
+      # qwen_list_sessions. No Ollama and no model needed, so this runs on a
+      # stock runner.
+      #
+      # tests/test_session_memory.py and tests/test_session_http.py are NOT run
+      # here: both need qwen3.6:35b-a3b (~24 GB), which exceeds a hosted
+      # runner's disk. Run them locally against a machine that has the model.
+      - name: Protocol test
+        run: uv run --script tests/test_protocol.py
+
+  shellcheck:
+    name: shellcheck install.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck install.sh
