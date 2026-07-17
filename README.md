@@ -1,4 +1,4 @@
-# qwen-delegate-mcp
+ # qwen-delegate-mcp
 
 Cut Claude Code costs by delegating mechanical work to a local Qwen model.
 Claude plans and reviews; Qwen does the grunt work (bulk renames, docstrings,
@@ -60,6 +60,11 @@ memory and there must be exactly one copy. Under stdio, every Claude Code
 instance spawns its own server, so `qwen_list_sessions` could not find a session
 you opened in another project. `MCP_TRANSPORT=stdio` is fine for a single
 client, and the tests use it.
+
+Replies stream: a long generation reports progress every few seconds so the
+client stays alive instead of blocking silently for minutes. State is persisted
+per turn, and a failed `qwen_send` rolls back the message it appended, so a
+mid-task crash leaves the session consistent and safe to retry.
 
 ## Setup
 
@@ -137,7 +142,7 @@ to paste in wholesale.
 | tool | purpose |
 |---|---|
 | `qwen_start_session(topic, system_prompt, model)` | Open a stateful chat; returns `session_id`. |
-| `qwen_send(session_id, message)` | Send a turn. Full history is replayed to Ollama. |
+| `qwen_send(session_id, message)` | Send a turn. Full history is replayed to Ollama; the reply streams, with progress notifications on long runs. |
 | `qwen_get_history(session_id, tail=0)` | Read the transcript; `tail=N` for the last N. |
 | `qwen_list_sessions()` | List active sessions. |
 | `qwen_end_session(session_id)` | Close and delete state. Idempotent. |
@@ -154,6 +159,7 @@ Set in the LaunchAgent plist or your shell.
 | `QWEN_MODEL` | `qwen3.6:35b-a3b` | Default model tag. |
 | `QWEN_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded. |
 | `QWEN_TIMEOUT` | `600` | HTTP timeout per `/api/chat` call, seconds. |
+| `QWEN_PROGRESS_INTERVAL` | `10` | Seconds between progress notifications during a stream. |
 | `QWEN_DATA_DIR` | `<repo>/data/sessions` | Where session JSON lives. |
 | `MCP_HOST` / `MCP_PORT` | `127.0.0.1` / `11435` | MCP server bind address. |
 | `MCP_TRANSPORT` | `streamable-http` | `stdio` for local testing. |
@@ -172,8 +178,10 @@ claude mcp remove qwen-delegate --scope user
 claude mcp add --transport http --scope user qwen-delegate http://localhost:<port>/mcp
 ```
 
-**`qwen_send` returns an HTTP error.** Ollama is down or the model is not
-pulled. Check `curl localhost:11434/api/version` and `ollama list`.
+**`qwen_send` fails.** The error says which case it is: can't reach Ollama
+(`ollama serve`), no such model (`ollama pull`), or timeout (raise
+`QWEN_TIMEOUT`). A failed send rolls back its message, so the session stays
+consistent and safe to retry.
 
 **First call is slow (30-60 s).** Ollama is loading 24 GB into memory. Later
 calls are warm; raise `QWEN_KEEP_ALIVE` to extend that.

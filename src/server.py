@@ -14,7 +14,9 @@ context, list active sessions, and close them.
 
 Transport: streamable HTTP on localhost. Set MCP_TRANSPORT=stdio to override.
 State: in-memory + JSON files under data/sessions/.
-Backend: Ollama /api/chat at http://localhost:11434 (configurable via OLLAMA_HOST).
+Backend: Ollama /api/chat (streaming) at http://localhost:11434 (configurable via
+OLLAMA_HOST). Long generations emit MCP progress notifications so the client stays
+alive and the caller sees the reply growing instead of a silent multi-minute block.
 """
 
 from __future__ import annotations
@@ -28,13 +30,14 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 DEFAULT_MODEL = os.environ.get("QWEN_MODEL", "qwen3.6:35b-a3b")
 KEEP_ALIVE = os.environ.get("QWEN_KEEP_ALIVE", "30m")
 REQUEST_TIMEOUT = float(os.environ.get("QWEN_TIMEOUT", "600"))
+PROGRESS_INTERVAL = float(os.environ.get("QWEN_PROGRESS_INTERVAL", "10"))
 
 DATA_DIR = Path(os.environ.get(
     "QWEN_DATA_DIR",
@@ -91,18 +94,78 @@ def _get(session_id: str) -> Session:
     return s
 
 
-def _call_ollama(model: str, messages: list[dict]) -> dict[str, Any]:
-    """POST to /api/chat. Returns parsed JSON. Raises on HTTP or network error."""
+def _ollama_down_msg() -> str:
+    return (
+        f"Cannot reach Ollama at {OLLAMA_HOST}. Is it running? "
+        f"Start it with `ollama serve`, or set OLLAMA_HOST to the right address."
+    )
+
+
+def _model_missing_msg(model: str) -> str:
+    return (
+        f"Ollama has no model named {model!r}. Pull it with `ollama pull {model}`, "
+        f"or pass a model you already have (see `ollama list`)."
+    )
+
+
+async def _safe(awaitable: Any) -> None:
+    """Await a notification, swallowing errors — a failed progress/log
+    notification must never fail an otherwise-successful generation."""
+    try:
+        await awaitable
+    except Exception:
+        pass
+
+
+async def _stream_chat(model: str, messages: list[dict]):
+    """
+    Stream Ollama /api/chat, yielding events:
+        ("token", str)  -- an incremental chunk of the assistant reply
+        ("done", dict)  -- the terminal object carrying eval/prompt counts
+
+    Raises ValueError/RuntimeError with actionable text on the failure modes
+    that actually happen locally (Ollama down, model not pulled, timeout).
+    """
     payload = {
         "model": model,
         "messages": messages,
-        "stream": False,
+        "stream": True,
         "keep_alive": KEEP_ALIVE,
     }
-    with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
-        r = client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
-        r.raise_for_status()
-        return r.json()
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            async with client.stream(
+                "POST", f"{OLLAMA_HOST}/api/chat", json=payload
+            ) as r:
+                if r.status_code >= 400:
+                    body = (await r.aread()).decode("utf-8", "replace").strip()
+                    if r.status_code == 404:
+                        raise ValueError(_model_missing_msg(model))
+                    raise RuntimeError(
+                        f"Ollama returned HTTP {r.status_code}: {body[:500]}"
+                    )
+                async for line in r.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    err = obj.get("error")
+                    if err:
+                        if "not found" in str(err).lower():
+                            raise ValueError(_model_missing_msg(model))
+                        raise RuntimeError(f"Ollama error: {err}")
+                    chunk = obj.get("message", {}).get("content", "")
+                    if chunk:
+                        yield ("token", chunk)
+                    if obj.get("done"):
+                        yield ("done", obj)
+    except httpx.ConnectError as e:
+        raise RuntimeError(_ollama_down_msg()) from e
+    except httpx.TimeoutException as e:
+        raise RuntimeError(
+            f"Qwen call exceeded QWEN_TIMEOUT ({REQUEST_TIMEOUT:.0f}s). Raise it for "
+            f"longer generations, e.g. QWEN_TIMEOUT=1200."
+        ) from e
 
 
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
@@ -154,13 +217,19 @@ def qwen_start_session(
 
 
 @mcp.tool()
-def qwen_send(session_id: str, message: str) -> dict[str, Any]:
+async def qwen_send(session_id: str, message: str, ctx: Context) -> dict[str, Any]:
     """
     Send a message to an existing Qwen session and get the reply.
 
     The full session history is sent to Qwen every call, so context is retained
     across turns. Long sessions accumulate tokens — call qwen_end_session when
     the task is done to free the state (and let Ollama unload the model).
+
+    The reply is streamed from Ollama: while a long generation runs, the server
+    emits MCP progress notifications (roughly every QWEN_PROGRESS_INTERVAL
+    seconds) so the client stays alive instead of blocking silently. If the call
+    fails (Ollama down, model not pulled, timeout), the just-sent message is
+    rolled back so the session stays consistent and the call is safe to retry.
 
     Args:
         session_id: The ID returned by qwen_start_session.
@@ -171,21 +240,49 @@ def qwen_send(session_id: str, message: str) -> dict[str, Any]:
     s = _get(session_id)
     s.messages.append({"role": "user", "content": message})
     started = time.time()
-    resp = _call_ollama(s.model, s.messages)
-    latency_ms = int((time.time() - started) * 1000)
+    await _safe(ctx.info(f"Qwen ({s.model}) is generating a reply…"))
 
-    msg = resp.get("message", {})
-    reply = msg.get("content", "")
+    parts: list[str] = []
+    final: dict[str, Any] = {}
+    last_report = started
+    try:
+        async for kind, data in _stream_chat(s.model, s.messages):
+            if kind == "token":
+                parts.append(data)
+                now = time.time()
+                if now - last_report >= PROGRESS_INTERVAL:
+                    last_report = now
+                    chars = sum(len(p) for p in parts)
+                    await _safe(ctx.report_progress(
+                        progress=chars,
+                        message=f"Qwen is generating… {chars} chars, "
+                                f"{now - started:.0f}s elapsed",
+                    ))
+            else:  # "done"
+                final = data
+    except Exception:
+        # Keep the session resumable: drop the user turn we optimistically
+        # appended so a retry reproduces a clean turn rather than stacking two
+        # user messages in a row.
+        if s.messages and s.messages[-1].get("role") == "user":
+            s.messages.pop()
+        raise
+
+    reply = "".join(parts)
+    latency_ms = int((time.time() - started) * 1000)
     s.messages.append({"role": "assistant", "content": reply})
     s.last_used_at = time.time()
     s.save()
+    await _safe(ctx.report_progress(
+        progress=len(reply), total=len(reply), message="done"
+    ))
 
     return {
         "reply": reply,
         "session_id": session_id,
         "turn": s.message_count() // 2,
-        "eval_count": resp.get("eval_count"),
-        "prompt_eval_count": resp.get("prompt_eval_count"),
+        "eval_count": final.get("eval_count"),
+        "prompt_eval_count": final.get("prompt_eval_count"),
         "total_duration_ms": latency_ms,
     }
 
