@@ -66,11 +66,19 @@ brief, N outputs, `npm test` or equivalent to check them.
 4. **Assume Qwen can crash mid-task.** It has before. Keep delegated work
    resumable, and do not stack a long unrecoverable chain behind it.
 
-5. **Read `qwen_get_history` before `qwen_end_session`.** Closing deletes the
+5. **A `qwen_send` timeout is NOT a Qwen failure.** The MCP call can idle out
+   (~300s) while Ollama keeps generating; the finished reply still lands in the
+   session transcript. After any timeout, call `qwen_get_history` FIRST and only
+   re-ask if it confirms nothing was produced. Re-asking blind double-generates
+   and desyncs the session — the model answers twice and the transcript no
+   longer matches what you think you sent. To avoid the timeout, size each
+   turn's output to ≲150 lines, or raise the per-server MCP `timeout`.
+
+6. **Read `qwen_get_history` before `qwen_end_session`.** Closing deletes the
    transcript, and that transcript is the only evidence of whether delegation
    worked. Skim it, then close.
 
-6. **When resuming work in a fresh conversation**, call `qwen_list_sessions`
+7. **When resuming work in a fresh conversation**, call `qwen_list_sessions`
    first to check for an existing session for this task. Resume it instead of
    starting a duplicate.
 
@@ -85,3 +93,8 @@ Good:
 Bad (do these yourself):
 - "Is this the right architecture?" (judgment call)
 - "Debug why the tests are flaky." (needs to run code, form hypotheses)
+
+Whatever the shape, state the codebase's style conventions in the brief (e.g.
+"semicolon-free, prefer `const`"). Qwen's logic is usually sound; its deviations
+tend to be cosmetic, and a one-line convention note heads them off before you
+have to fix them by hand.

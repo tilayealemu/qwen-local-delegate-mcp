@@ -127,10 +127,17 @@ to paste in wholesale.
 
 **In practice**
 
+- State the codebase's style conventions in the brief (e.g. semicolon-free,
+  prefer `const`). Qwen's logic is usually sound; its deviations tend to be
+  cosmetic, and a one-line note heads them off before you fix them by hand.
 - Read `qwen_get_history` before `qwen_end_session`. Closing deletes the
   transcript, and that transcript is your only evidence of whether delegation
   worked.
 - Qwen can crash mid-task. Anything routed through it should be resumable.
+- A `qwen_send` timeout is not a failure. The MCP call can idle out while Ollama
+  keeps generating, and the finished reply still lands in the transcript. Call
+  `qwen_get_history` before re-asking — re-asking blind double-generates and
+  desyncs the session. Keep each turn's output to ≲150 lines to avoid it.
 - If a subagent drives Qwen, that hop only pays when Qwen's output is bulky
   enough to be worth keeping out of the orchestrator's context. For a 20-line
   fix the round trip is pure overhead.
@@ -182,6 +189,13 @@ claude mcp add --transport http --scope user qwen-delegate http://localhost:<por
 (`ollama serve`), no such model (`ollama pull`), or timeout (raise
 `QWEN_TIMEOUT`). A failed send rolls back its message, so the session stays
 consistent and safe to retry.
+
+**`qwen_send` times out, but the work isn't lost.** The MCP client can idle out
+(~300s) while Ollama keeps generating; the finished reply still lands in the
+session transcript. A timeout is not a Qwen failure. Call `qwen_get_history`
+*before* re-asking — re-asking blind makes the model answer twice and desyncs
+the session. Avoid it by keeping each turn's output to ≲150 lines, or by raising
+the per-server MCP `timeout` (and `QWEN_TIMEOUT` for the Ollama call itself).
 
 **First call is slow (30-60 s).** Ollama is loading 24 GB into memory. Later
 calls are warm; raise `QWEN_KEEP_ALIVE` to extend that.
