@@ -15,6 +15,7 @@ Requires: Ollama running with qwen3.6:35b-a3b pulled.
 import asyncio
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
@@ -22,6 +23,7 @@ from mcp.client.stdio import stdio_client
 
 SERVER = Path(__file__).resolve().parent.parent / "src" / "server.py"
 SECRET = "aubergine-92-orbital"
+FILE_SECRET = "walnut-47-cascade"
 
 
 def _text(resp) -> dict:
@@ -76,7 +78,32 @@ async def main() -> int:
 
             passed = SECRET in turn2["reply"]
 
+            # files[]: the server must read the file itself and forward its
+            # content into the prompt, with no content pasted into `message`.
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False
+            ) as f:
+                f.write(f"The file's secret code is: {FILE_SECRET}\n")
+                file_path = f.name
+            try:
+                turn3 = _text(await session.call_tool(
+                    "qwen_send",
+                    {
+                        "session_id": sid,
+                        "message": "What is the secret code in the attached file? Only output the code.",
+                        "files": [file_path],
+                    },
+                ))
+                print(f"turn 3 (files[]) reply: {turn3['reply'][:200]}")
+                files_passed = FILE_SECRET in turn3["reply"]
+            finally:
+                Path(file_path).unlink(missing_ok=True)
+
             await session.call_tool("qwen_end_session", {"session_id": sid})
+
+    if not files_passed:
+        print(f"FAIL: files[] round trip did not surface {FILE_SECRET!r}")
+        return 1
 
     if passed:
         print("OK: session context retained across turns")

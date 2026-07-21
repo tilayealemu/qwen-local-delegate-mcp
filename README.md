@@ -1,4 +1,4 @@
- # qwen-delegate-mcp
+ # qwen-local-delegate-mcp
 
 Cut Claude Code costs by delegating mechanical work to a local Qwen model.
 Claude plans and reviews; Qwen does the grunt work (bulk renames, docstrings,
@@ -25,7 +25,7 @@ oracle.
               │  qwen_start_session / qwen_send / qwen_end_session ...
               ▼
    ┌─────────────────────────────┐  write   ┌──────────────────────────┐
-   │     qwen-delegate-mcp       │─────────►│  data/sessions/<id>.json │
+   │   qwen-local-delegate-mcp   │─────────►│  data/sessions/<id>.json │
    │                             │          │                          │
    │  owns session state in RAM  │◄─────────│  one file per session,   │
    │  one message list per id    │   load   │  reloaded on restart     │
@@ -44,7 +44,7 @@ oracle.
    └─────────────────────────────┘
 ```
 
-**Claude Code** sees five tools and calls them like it would `Read` or `Bash`.
+**Claude Code** sees six tools and calls them like it would `Read` or `Bash`.
 
 **The MCP server** owns session state. Each session is a message list keyed by a
 short `session_id`. Every `qwen_send` replays the full history to Ollama so Qwen
@@ -73,14 +73,14 @@ Prerequisites: macOS, Homebrew, Claude Code, `uv` (`brew install uv`).
 **1. Install.**
 
 ```bash
-git clone <this-repo> qwen-delegate-mcp
-cd qwen-delegate-mcp
+git clone <this-repo> qwen-local-delegate-mcp
+cd qwen-local-delegate-mcp
 ./install.sh          # idempotent, safe to re-run
 ```
 
 This installs Ollama, pulls `qwen3.6:35b-a3b` (~24 GB, one time), loads a
 LaunchAgent on port 11435, and registers the server with `claude mcp add`.
-Verify with `claude mcp get qwen-delegate`, which should report
+Verify with `claude mcp get qwen-local-delegate`, which should report
 `Status: ✔ Connected`.
 
 **2. Update your CLAUDE.md. This is required.** Installing the server is not
@@ -90,8 +90,12 @@ block from [`CLAUDE.md`](./CLAUDE.md) into `~/.claude/CLAUDE.md` for every
 project, or into a single project's own `CLAUDE.md`.
 
 **3. Restart Claude Code.** Already-open sessions will not see the tools until
-they restart. In a new session, `/mcp` should list `qwen-delegate` with five
+they restart. In a new session, `/mcp` should list `qwen-local-delegate` with six
 tools.
+
+**4. Sanity-check anytime.** `./verify.sh` verifies the whole pipeline —
+Ollama, the model, the LaunchAgent, the MCP server, and the CLAUDE.md
+guidance — in one read-only pass.
 
 ## Use
 
@@ -149,12 +153,25 @@ to paste in wholesale.
 | tool | purpose |
 |---|---|
 | `qwen_start_session(topic, system_prompt, model)` | Open a stateful chat; returns `session_id`. |
-| `qwen_send(session_id, message)` | Send a turn. Full history is replayed to Ollama; the reply streams, with progress notifications on long runs. |
+| `qwen_send(session_id, message, files=[])` | Send a turn. Full history is replayed to Ollama; the reply streams, with progress notifications on long runs. |
 | `qwen_get_history(session_id, tail=0)` | Read the transcript; `tail=N` for the last N. |
 | `qwen_list_sessions()` | List active sessions. |
+| `qwen_list_models()` | List Ollama models pulled locally, with the configured default. |
 | `qwen_end_session(session_id)` | Close and delete state. Idempotent. |
 
 One session per coherent task; reuse the `session_id` across follow-ups.
+
+**Passing files without spending your own context.** `qwen_send`'s optional
+`files` argument takes absolute paths; the server reads them off disk and
+attaches their contents to the message itself, so file bytes go straight into
+Qwen's prompt without ever landing in Claude's context:
+
+```
+qwen_send(session_id, "Summarize what this file does.", files=["/abs/path/large_module.py"])
+```
+
+Prefer this over `Read`-then-paste whenever the point of delegating is to keep
+the file's bulk out of your own context — that's most of the time.
 
 ## Configuration
 
@@ -173,6 +190,10 @@ Set in the LaunchAgent plist or your shell.
 
 ## Troubleshooting
 
+**Start here:** `./verify.sh` checks Ollama, the model, the LaunchAgent, the
+MCP server, and the CLAUDE.md guidance in one pass and tells you which one is
+broken. It's read-only — safe to run anytime.
+
 **Claude looks for a `qwen` CLI.** You skipped the CLAUDE.md step, or Claude
 Code was already running at install. Update it and restart.
 
@@ -181,8 +202,8 @@ Code was already running at install. Update it and restart.
 and re-register:
 
 ```bash
-claude mcp remove qwen-delegate --scope user
-claude mcp add --transport http --scope user qwen-delegate http://localhost:<port>/mcp
+claude mcp remove qwen-local-delegate --scope user
+claude mcp add --transport http --scope user qwen-local-delegate http://localhost:<port>/mcp
 ```
 
 **`qwen_send` fails.** The error says which case it is: can't reach Ollama
@@ -206,14 +227,14 @@ have Qwen summarize and seed the next session's `system_prompt` with it.
 **Want a clean slate.** `rm data/sessions/*.json` while the server is idle.
 
 Logs are at `data/server.log`. LaunchAgent control: `launchctl list | grep qwen`,
-`launchctl unload|load ~/Library/LaunchAgents/local.qwen-delegate-mcp.plist`.
+`launchctl unload|load ~/Library/LaunchAgents/local.qwen-local-delegate-mcp.plist`.
 
 ## Uninstall
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/local.qwen-delegate-mcp.plist
-rm ~/Library/LaunchAgents/local.qwen-delegate-mcp.plist
-claude mcp remove qwen-delegate --scope user
+launchctl unload ~/Library/LaunchAgents/local.qwen-local-delegate-mcp.plist
+rm ~/Library/LaunchAgents/local.qwen-local-delegate-mcp.plist
+claude mcp remove qwen-local-delegate --scope user
 # Then remove the guidance block from your CLAUDE.md (manual).
 
 brew uninstall ollama && rm -rf ~/.ollama   # optional: nuke Ollama and the model

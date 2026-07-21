@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>local.qwen-delegate-mcp</string>
+    <string>local.qwen-local-delegate-mcp</string>
 
     <key>ProgramArguments</key>
     <array>

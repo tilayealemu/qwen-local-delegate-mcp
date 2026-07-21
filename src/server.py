@@ -117,6 +117,27 @@ async def _safe(awaitable: Any) -> None:
         pass
 
 
+def _read_files_block(paths: list[str]) -> str:
+    """
+    Read each path and render it as a labeled block to append to a message.
+
+    Reading happens server-side so file bytes go straight from disk into
+    Qwen's prompt without ever passing through the caller's own context.
+    Raises ValueError (actionable, caller-facing) on a bad path — before any
+    Ollama call, so a bad files[] entry never costs a wasted generation.
+    """
+    blocks = []
+    for raw in paths:
+        path = Path(raw)
+        if not path.is_absolute():
+            raise ValueError(f"files[] entries must be absolute paths, got {raw!r}")
+        if not path.is_file():
+            raise ValueError(f"File not found: {raw}")
+        text = path.read_text(encoding="utf-8", errors="replace")
+        blocks.append(f"--- {raw} ---\n{text}")
+    return "\n\n".join(blocks)
+
+
 async def _stream_chat(model: str, messages: list[dict]):
     """
     Stream Ollama /api/chat, yielding events:
@@ -172,7 +193,7 @@ MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("MCP_PORT", "11435"))
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "streamable-http")
 
-mcp = FastMCP("qwen-delegate", host=MCP_HOST, port=MCP_PORT)
+mcp = FastMCP("qwen-local-delegate", host=MCP_HOST, port=MCP_PORT)
 
 
 @mcp.tool()
@@ -217,7 +238,12 @@ def qwen_start_session(
 
 
 @mcp.tool()
-async def qwen_send(session_id: str, message: str, ctx: Context) -> dict[str, Any]:
+async def qwen_send(
+    session_id: str,
+    message: str,
+    ctx: Context,
+    files: list[str] | None = None,
+) -> dict[str, Any]:
     """
     Send a message to an existing Qwen session and get the reply.
 
@@ -234,11 +260,19 @@ async def qwen_send(session_id: str, message: str, ctx: Context) -> dict[str, An
     Args:
         session_id: The ID returned by qwen_start_session.
         message: The user message to send (Claude's instruction to Qwen).
+        files: Absolute paths to read and attach to this message. Use this
+            instead of pasting file contents into `message` — the server reads
+            the bytes directly, so they never pass through your own context.
+            Still counts toward the ≲150-line-per-turn guidance for avoiding
+            qwen_send timeouts.
 
     Returns: {reply, session_id, turn, eval_count, prompt_eval_count, total_duration_ms}
     """
     s = _get(session_id)
-    s.messages.append({"role": "user", "content": message})
+    content = message
+    if files:
+        content = f"{message}\n\n{_read_files_block(files)}" if message else _read_files_block(files)
+    s.messages.append({"role": "user", "content": content})
     started = time.time()
     await _safe(ctx.info(f"Qwen ({s.model}) is generating a reply…"))
 
@@ -326,6 +360,41 @@ def qwen_list_sessions() -> dict[str, Any]:
             for s in sorted(SESSIONS.values(), key=lambda x: x.last_used_at, reverse=True)
         ]
     }
+
+
+@mcp.tool()
+async def qwen_list_models() -> dict[str, Any]:
+    """
+    List Ollama models pulled locally, with the currently configured default.
+
+    Call this before qwen_start_session to confirm a model is actually
+    available instead of discovering it is missing only after qwen_send fails.
+
+    Returns {"default_model", "models": [{name, size_gb, parameter_size,
+    quantization, modified_at}, ...]}.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{OLLAMA_HOST}/api/tags")
+            r.raise_for_status()
+    except httpx.ConnectError as e:
+        raise RuntimeError(_ollama_down_msg()) from e
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(
+            f"Ollama returned HTTP {e.response.status_code} for /api/tags"
+        ) from e
+
+    models = []
+    for m in r.json().get("models", []):
+        details = m.get("details", {})
+        models.append({
+            "name": m.get("name") or m.get("model"),
+            "size_gb": round(m.get("size", 0) / 1e9, 1),
+            "parameter_size": details.get("parameter_size"),
+            "quantization": details.get("quantization_level"),
+            "modified_at": m.get("modified_at"),
+        })
+    return {"default_model": DEFAULT_MODEL, "models": models}
 
 
 @mcp.tool()

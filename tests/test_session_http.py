@@ -6,7 +6,7 @@
 End-to-end test against the live LaunchAgent-hosted MCP server (HTTP transport).
 
 This exercises the exact same server instance Claude Code will connect to.
-Verifies (1) HTTP MCP handshake works, (2) all five tools are advertised,
+Verifies (1) HTTP MCP handshake works, (2) all six tools are advertised,
 (3) a multi-turn session actually retains context.
 
 Requires:
@@ -30,6 +30,7 @@ EXPECTED_TOOLS = {
     "qwen_end_session",
     "qwen_list_sessions",
     "qwen_get_history",
+    "qwen_list_models",
 }
 
 

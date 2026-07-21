@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# One-shot installer for qwen-delegate-mcp. Idempotent — safe to re-run.
+# One-shot installer for qwen-local-delegate-mcp. Idempotent — safe to re-run.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODEL="${QWEN_MODEL:-qwen3.6:35b-a3b}"
 
-PLIST_LABEL="local.qwen-delegate-mcp"
-PLIST_TEMPLATE="${REPO_DIR}/qwen-delegate-mcp.plist.template"
+PLIST_LABEL="local.qwen-local-delegate-mcp"
+PLIST_TEMPLATE="${REPO_DIR}/qwen-local-delegate-mcp.plist.template"
 PLIST_DST="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
 MCP_URL="http://localhost:11435/mcp"
 
@@ -66,12 +66,12 @@ done
 
 say "Registering with Claude Code"
 # Drop any existing entry first so re-runs don't trip over "already exists".
-claude mcp remove qwen-delegate --scope user >/dev/null 2>&1 || true
-claude mcp add --transport http --scope user qwen-delegate "${MCP_URL}" \
-    || die "'claude mcp add' failed — qwen-delegate was not registered. Resolve the error above and re-run."
+claude mcp remove qwen-local-delegate --scope user >/dev/null 2>&1 || true
+claude mcp add --transport http --scope user qwen-local-delegate "${MCP_URL}" \
+    || die "'claude mcp add' failed — qwen-local-delegate was not registered. Resolve the error above and re-run."
 
 say "Verifying registration"
-claude mcp get qwen-delegate 2>&1 | grep -E "Status|URL" || true
+claude mcp get qwen-local-delegate 2>&1 | grep -E "Status|URL" || true
 
 say "Running protocol test"
 uv run --script "${REPO_DIR}/tests/test_protocol.py"
@@ -84,7 +84,7 @@ Next steps:
   1. Add the delegation guidance to your CLAUDE.md — see CLAUDE.md in this repo
      for the exact wording. Without it Claude won't reliably use the tools.
   2. Restart Claude Code so it picks up the new MCP.
-  3. In a new session, run /mcp — you should see qwen-delegate with 5 tools.
+  3. In a new session, run /mcp — you should see qwen-local-delegate with 6 tools.
 
 Logs: ${REPO_DIR}/data/server.log
 Unload: launchctl unload ${PLIST_DST}

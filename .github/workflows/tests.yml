@@ -29,8 +29,8 @@ jobs:
         run: uv run --script tests/test_protocol.py
 
   shellcheck:
-    name: shellcheck install.sh
+    name: shellcheck install.sh verify.sh
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck install.sh
+      - run: shellcheck install.sh verify.sh
