@@ -101,15 +101,20 @@ async def main() -> int:
 
             await session.call_tool("qwen_end_session", {"session_id": sid})
 
+    # Report both outcomes rather than returning on the first failure — a
+    # files[] regression must not mask a session-memory regression.
+    ok = True
+    if not passed:
+        print(f"FAIL: reply did not contain the secret {SECRET!r}")
+        ok = False
     if not files_passed:
         print(f"FAIL: files[] round trip did not surface {FILE_SECRET!r}")
+        ok = False
+    if not ok:
         return 1
 
-    if passed:
-        print("OK: session context retained across turns")
-        return 0
-    print(f"FAIL: reply did not contain the secret {SECRET!r}")
-    return 1
+    print("OK: session context retained across turns, files[] round trip works")
+    return 0
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ and call one that doesn't need the model. No Ollama required.
 import asyncio
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
@@ -71,21 +72,50 @@ async def main() -> int:
                 print(f"qwen_list_models -> {len(data['models'])} model(s), default={data['default_model']}")
 
             # files[] validation must fail before any Ollama call, so a bad
-            # path is a fast, clear error even with Ollama unreachable.
+            # entry is a fast, clear error even with Ollama unreachable.
             start = json.loads((await session.call_tool(
                 "qwen_start_session", {"topic": "files validation test"}
             )).content[0].text)
-            resp = await session.call_tool("qwen_send", {
-                "session_id": start["session_id"],
-                "message": "irrelevant",
-                "files": ["/nonexistent/path/for/sure.txt"],
-            })
-            text = resp.content[0].text
-            if not resp.isError or "File not found" not in text:
-                print(f"FAIL: qwen_send did not reject bad files[] path cleanly: {text[:200]}")
-                return 1
-            print("qwen_send -> rejected bad files[] path cleanly")
-            await session.call_tool("qwen_end_session", {"session_id": start["session_id"]})
+            sid = start["session_id"]
+            try:
+                with tempfile.TemporaryDirectory() as tmp:
+                    binary = Path(tmp) / "blob.bin"
+                    binary.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00not text")
+                    oversize = Path(tmp) / "huge.txt"
+                    oversize.write_text("x" * 2_000_001)
+
+                    cases = [
+                        (["relative/path.txt"], "absolute paths"),
+                        (["/nonexistent/path/for/sure.txt"], "File not found"),
+                        ([str(binary)], "binary file"),
+                        ([str(oversize)], "attachment budget"),
+                    ]
+                    for files, expected in cases:
+                        resp = await session.call_tool("qwen_send", {
+                            "session_id": sid,
+                            "message": "irrelevant",
+                            "files": files,
+                        })
+                        text = resp.content[0].text
+                        if not resp.isError or expected not in text:
+                            print(f"FAIL: qwen_send accepted files={files} or missed "
+                                  f"{expected!r}: {text[:200]}")
+                            return 1
+                    print(f"qwen_send -> rejected {len(cases)} bad files[] cases cleanly")
+
+                    # A rejected turn must leave the session untouched, so a
+                    # corrected retry doesn't stack orphaned user messages.
+                    hist = json.loads((await session.call_tool(
+                        "qwen_get_history", {"session_id": sid}
+                    )).content[0].text)
+                    non_system = [m for m in hist["messages"] if m["role"] != "system"]
+                    if non_system:
+                        print(f"FAIL: rejected files[] turns left {len(non_system)} "
+                              f"message(s) in the session")
+                        return 1
+                    print("qwen_send -> rejected turns left the session clean")
+            finally:
+                await session.call_tool("qwen_end_session", {"session_id": sid})
 
     print("OK: protocol test passed")
     return 0

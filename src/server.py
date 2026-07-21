@@ -38,6 +38,7 @@ DEFAULT_MODEL = os.environ.get("QWEN_MODEL", "qwen3.6:35b-a3b")
 KEEP_ALIVE = os.environ.get("QWEN_KEEP_ALIVE", "30m")
 REQUEST_TIMEOUT = float(os.environ.get("QWEN_TIMEOUT", "600"))
 PROGRESS_INTERVAL = float(os.environ.get("QWEN_PROGRESS_INTERVAL", "10"))
+MAX_ATTACH_BYTES = int(os.environ.get("QWEN_MAX_ATTACH_BYTES", "2000000"))
 
 DATA_DIR = Path(os.environ.get(
     "QWEN_DATA_DIR",
@@ -125,16 +126,38 @@ def _read_files_block(paths: list[str]) -> str:
     Qwen's prompt without ever passing through the caller's own context.
     Raises ValueError (actionable, caller-facing) on a bad path — before any
     Ollama call, so a bad files[] entry never costs a wasted generation.
+
+    Rejects binaries and anything over MAX_ATTACH_BYTES in total. Both would
+    otherwise fail silently and expensively: a binary decodes to a screenful of
+    replacement chars, and an oversized attachment blows the context window
+    somewhere inside Ollama rather than here.
     """
     blocks = []
+    total = 0
     for raw in paths:
         path = Path(raw)
         if not path.is_absolute():
             raise ValueError(f"files[] entries must be absolute paths, got {raw!r}")
         if not path.is_file():
             raise ValueError(f"File not found: {raw}")
-        text = path.read_text(encoding="utf-8", errors="replace")
-        blocks.append(f"--- {raw} ---\n{text}")
+
+        size = path.stat().st_size
+        total += size
+        if total > MAX_ATTACH_BYTES:
+            raise ValueError(
+                f"files[] exceeds the {MAX_ATTACH_BYTES / 1e6:.1f} MB attachment "
+                f"budget at {raw} ({size / 1e6:.1f} MB, {total / 1e6:.1f} MB total). "
+                f"Attach a smaller slice, split it across turns, or raise "
+                f"QWEN_MAX_ATTACH_BYTES."
+            )
+
+        data = path.read_bytes()
+        if b"\x00" in data:
+            raise ValueError(
+                f"{raw} looks like a binary file (contains NUL bytes). files[] is "
+                f"text only — attaching binary spends context on garbage."
+            )
+        blocks.append(f"--- {raw} ---\n{data.decode('utf-8', errors='replace')}")
     return "\n\n".join(blocks)
 
 
@@ -263,8 +286,11 @@ async def qwen_send(
         files: Absolute paths to read and attach to this message. Use this
             instead of pasting file contents into `message` — the server reads
             the bytes directly, so they never pass through your own context.
-            Still counts toward the ≲150-line-per-turn guidance for avoiding
-            qwen_send timeouts.
+            Attach freely: this is prompt input, not generated output, so it
+            does not count toward the per-turn output-size guidance for
+            avoiding timeouts. Text files only, up to QWEN_MAX_ATTACH_BYTES
+            (default 2 MB) across all entries; bad paths, binaries, and
+            oversized attachments are rejected before any Ollama call.
 
     Returns: {reply, session_id, turn, eval_count, prompt_eval_count, total_duration_ms}
     """
@@ -379,6 +405,13 @@ async def qwen_list_models() -> dict[str, Any]:
             r.raise_for_status()
     except httpx.ConnectError as e:
         raise RuntimeError(_ollama_down_msg()) from e
+    except httpx.TimeoutException as e:
+        # A connect/read timeout is not a ConnectError, but from the caller's
+        # side it is the same problem with the same fix.
+        raise RuntimeError(
+            f"{_ollama_down_msg()} (Timed out after 10s — it may be up but wedged; "
+            f"check `ollama ps`.)"
+        ) from e
     except httpx.HTTPStatusError as e:
         raise RuntimeError(
             f"Ollama returned HTTP {e.response.status_code} for /api/tags"

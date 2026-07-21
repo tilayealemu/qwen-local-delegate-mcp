@@ -153,7 +153,7 @@ to paste in wholesale.
 | tool | purpose |
 |---|---|
 | `qwen_start_session(topic, system_prompt, model)` | Open a stateful chat; returns `session_id`. |
-| `qwen_send(session_id, message, files=[])` | Send a turn. Full history is replayed to Ollama; the reply streams, with progress notifications on long runs. |
+| `qwen_send(session_id, message, files=None)` | Send a turn. Full history is replayed to Ollama; the reply streams, with progress notifications on long runs. |
 | `qwen_get_history(session_id, tail=0)` | Read the transcript; `tail=N` for the last N. |
 | `qwen_list_sessions()` | List active sessions. |
 | `qwen_list_models()` | List Ollama models pulled locally, with the configured default. |
@@ -171,7 +171,14 @@ qwen_send(session_id, "Summarize what this file does.", files=["/abs/path/large_
 ```
 
 Prefer this over `Read`-then-paste whenever the point of delegating is to keep
-the file's bulk out of your own context — that's most of the time.
+the file's bulk out of your own context — that's most of the time. Attachment
+size is not a timeout risk: the ~150-line-per-turn guidance is about how much
+Qwen *generates*, and `files` is prompt input, not output.
+
+Text files only, up to `QWEN_MAX_ATTACH_BYTES` (2 MB) across all entries.
+Relative paths, missing paths, binaries, and oversized attachments are all
+rejected before Ollama is called, so a bad entry costs a fast error rather than
+a wasted generation or a silently truncated prompt.
 
 ## Configuration
 
@@ -184,6 +191,7 @@ Set in the LaunchAgent plist or your shell.
 | `QWEN_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded. |
 | `QWEN_TIMEOUT` | `600` | HTTP timeout per `/api/chat` call, seconds. |
 | `QWEN_PROGRESS_INTERVAL` | `10` | Seconds between progress notifications during a stream. |
+| `QWEN_MAX_ATTACH_BYTES` | `2000000` | Total bytes `qwen_send`'s `files` may attach per turn. |
 | `QWEN_DATA_DIR` | `<repo>/data/sessions` | Where session JSON lives. |
 | `MCP_HOST` / `MCP_PORT` | `127.0.0.1` / `11435` | MCP server bind address. |
 | `MCP_TRANSPORT` | `streamable-http` | `stdio` for local testing. |

@@ -63,7 +63,10 @@ brief, N outputs, `npm test` or equivalent to check them.
    yourself first.** `qwen_send(session_id, message, files=["/abs/path.py"])`
    has the server read the bytes straight off disk into Qwen's prompt. Reading
    the file into your own context first and pasting it into `message` defeats
-   the point of delegating — you pay for the bulk twice.
+   the point of delegating — you pay for the bulk twice. Absolute paths, text
+   files only, 2 MB total per turn; bad entries are rejected before Ollama is
+   called. Attachment size is not a timeout risk — the ≲150-line rule in (6)
+   is about what Qwen *generates*, not what you attach, so attach freely.
 
 4. **Verify Qwen's output before applying it.** Qwen is smaller and cheaper than
    you and can hallucinate. Treat its replies as drafts: when it emits code,
