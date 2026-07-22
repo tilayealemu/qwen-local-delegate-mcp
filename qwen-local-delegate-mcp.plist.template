@@ -21,6 +21,8 @@
         <string>127.0.0.1</string>
         <key>MCP_PORT</key>
         <string>11435</string>
+        <key>QWEN_MODEL</key>
+        <string>__QWEN_MODEL__</string>
         <key>PATH</key>
         <string>__PATH__</string>
     </dict>

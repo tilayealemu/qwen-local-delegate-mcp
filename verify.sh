@@ -12,10 +12,21 @@
 set -u
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODEL="${QWEN_MODEL:-qwen3.6:35b-a3b}"
 
 PLIST_LABEL="local.qwen-local-delegate-mcp"
+PLIST_DST="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
 MCP_URL="http://localhost:11435/mcp"
+
+# The installed LaunchAgent is the source of truth for which tag the daemon will
+# actually ask Ollama for, since install.sh bakes QWEN_MODEL into it. Reading it
+# back is what keeps a custom-model install from tripping a false "not pulled"
+# failure below. An explicit QWEN_MODEL in the environment still wins.
+MODEL="${QWEN_MODEL:-}"
+if [[ -z "${MODEL}" ]]; then
+    MODEL="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:QWEN_MODEL' \
+        "${PLIST_DST}" 2>/dev/null)"
+fi
+MODEL="${MODEL:-qwen3.6:35b-a3b}"
 
 pass() { printf "  \033[1;32m\xe2\x9c\x94\033[0m %s\n" "$*"; }
 fail() { printf "  \033[1;31m\xe2\x9c\x98\033[0m %s\n" "$*"; FAILED=1; }

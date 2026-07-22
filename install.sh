@@ -44,9 +44,13 @@ fi
 
 say "Rendering LaunchAgent from template → ${PLIST_DST}"
 mkdir -p "$(dirname "${PLIST_DST}")" "${REPO_DIR}/data/sessions"
+# MODEL is baked into the plist, not just pulled: without it the daemon falls
+# back to server.py's compiled-in default and a custom-model install would ask
+# Ollama for a tag that was never pulled.
 sed \
     -e "s|__REPO_DIR__|${REPO_DIR}|g" \
     -e "s|__UV_PATH__|${UV_PATH}|g" \
+    -e "s|__QWEN_MODEL__|${MODEL}|g" \
     -e "s|__PATH__|${PATH}|g" \
     "${PLIST_TEMPLATE}" > "${PLIST_DST}"
 

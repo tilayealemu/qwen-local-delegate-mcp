@@ -73,7 +73,7 @@ Prerequisites: macOS, Homebrew, Claude Code, `uv` (`brew install uv`).
 **1. Install.**
 
 ```bash
-git clone <this-repo> qwen-local-delegate-mcp
+git clone https://github.com/tilayealemu/qwen-local-delegate-mcp.git
 cd qwen-local-delegate-mcp
 ./install.sh          # idempotent, safe to re-run
 ```
@@ -82,6 +82,24 @@ This installs Ollama, pulls `qwen3.6:35b-a3b` (~24 GB, one time), loads a
 LaunchAgent on port 11435, and registers the server with `claude mcp add`.
 Verify with `claude mcp get qwen-local-delegate`, which should report
 `Status: ✔ Connected`.
+
+**Using a smaller model.** The default wants roughly 24 GB resident, which is
+more than a 16 GB machine has to spare. `install.sh` honors `QWEN_MODEL`, so set
+it once at install time and the installer pulls that tag *and* bakes it into the
+LaunchAgent as the daemon's default:
+
+```bash
+QWEN_MODEL=qwen3:30b-a3b ./install.sh   # ~19 GB, same MoE shape as the default
+QWEN_MODEL=qwen3:8b      ./install.sh   # ~5 GB, dense, comfortable on 16 GB
+```
+
+Any tag from [ollama.com/library](https://ollama.com/library) works. Smaller
+models make worse deviations from a brief, so lean harder on the verification
+rules in [When to delegate](#when-to-delegate).
+
+To change models after installing, re-run `install.sh` with a new `QWEN_MODEL`,
+or `ollama pull <tag>` and pass `model` to `qwen_start_session` for a single
+session without disturbing the default.
 
 **2. Update your CLAUDE.md. This is required.** Installing the server is not
 enough. Without guidance Claude will not reliably use these tools, and a bare
@@ -187,7 +205,7 @@ Set in the LaunchAgent plist or your shell.
 | var | default | purpose |
 |---|---|---|
 | `OLLAMA_HOST` | `http://localhost:11434` | Where Ollama listens. |
-| `QWEN_MODEL` | `qwen3.6:35b-a3b` | Default model tag. |
+| `QWEN_MODEL` | `qwen3.6:35b-a3b` | Default model tag. Written into the plist by `install.sh`; see [Setup](#setup). |
 | `QWEN_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded. |
 | `QWEN_TIMEOUT` | `600` | HTTP timeout per `/api/chat` call, seconds. |
 | `QWEN_PROGRESS_INTERVAL` | `10` | Seconds between progress notifications during a stream. |
